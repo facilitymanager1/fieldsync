@@ -1,0 +1,43 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fieldsync
+  namespace: fieldsync-prod
+  labels:
+    app: fieldsync
+    environment: production
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: fieldsync-prod
+  name: fieldsync-role
+  labels:
+    app: fieldsync
+    environment: production
+rules:
+- apiGroups: [""]
+  resources: ["configmaps", "secrets"]
+  verbs: ["get", "list"]
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: fieldsync-binding
+  namespace: fieldsync-prod
+  labels:
+    app: fieldsync
+    environment: production
+subjects:
+- kind: ServiceAccount
+  name: fieldsync
+  namespace: fieldsync-prod
+roleRef:
+  kind: Role
+  name: fieldsync-role
+  apiGroup: rbac.authorization.k8s.io

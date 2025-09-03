@@ -1,0 +1,515 @@
+# Vertical Pod Autoscaler for FieldSync Application
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: fieldsync-app-vpa
+  namespace: fieldsync
+  labels:
+    app: fieldsync
+    component: autoscaling
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: fieldsync-app
+  updatePolicy:
+    updateMode: "Auto"  # Auto, Initial, Off
+  resourcePolicy:
+    containerPolicies:
+    - containerName: fieldsync-app
+      minAllowed:
+        cpu: "100m"
+        memory: "256Mi"
+      maxAllowed:
+        cpu: "2000m"
+        memory: "4Gi"
+      controlledResources: ["cpu", "memory"]
+
+---
+# Custom Metrics for Application-specific Autoscaling
+apiVersion: v1
+kind: ServiceMonitor
+metadata:
+  name: fieldsync-app-metrics
+  namespace: fieldsync
+  labels:
+    app: fieldsync
+    component: monitoring
+spec:
+  selector:
+    matchLabels:
+      app: fieldsync
+      component: application
+  endpoints:
+  - port: metrics
+    interval: 30s
+    path: /metrics
+
+---
+# Custom HPA with multiple metrics
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: fieldsync-app-advanced-hpa
+  namespace: fieldsync
+  labels:
+    app: fieldsync
+    component: autoscaling
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: fieldsync-app
+  minReplicas: 3
+  maxReplicas: 20
+  metrics:
+  # CPU-based scaling
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  
+  # Memory-based scaling
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+  
+  # Custom metrics-based scaling (requests per second)
+  - type: Pods
+    pods:
+      metric:
+        name: http_requests_per_second
+      target:
+        type: AverageValue
+        averageValue: "100"
+  
+  # Queue length-based scaling (if using job queues)
+  - type: Object
+    object:
+      metric:
+        name: redis_queue_length
+      target:
+        type: Value
+        value: "50"
+      describedObject:
+        apiVersion: v1
+        kind: Service
+        name: fieldsync-redis
+
+  # Scaling behavior configuration
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300  # 5 minutes
+      policies:
+      - type: Percent
+        value: 20  # Scale down by max 20% of current replicas
+        periodSeconds: 60
+      - type: Pods
+        value: 2   # Scale down by max 2 pods
+        periodSeconds: 60
+      selectPolicy: Min  # Use the policy that results in fewer changes
+    
+    scaleUp:
+      stabilizationWindowSeconds: 60   # 1 minute
+      policies:
+      - type: Percent
+        value: 100  # Scale up by max 100% (double) of current replicas
+        periodSeconds: 30
+      - type: Pods
+        value: 4    # Scale up by max 4 pods
+        periodSeconds: 30
+      selectPolicy: Max  # Use the policy that results in more changes
+
+---
+# Pod Disruption Budget to maintain availability during scaling
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: fieldsync-app-pdb
+  namespace: fieldsync
+  labels:
+    app: fieldsync
+    component: availability
+spec:
+  minAvailable: 2  # Always keep at least 2 pods running
+  selector:
+    matchLabels:
+      app: fieldsync
+      component: application
+
+---
+# MongoDB PDB
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: fieldsync-mongodb-pdb
+  namespace: fieldsync
+  labels:
+    app: fieldsync
+    component: database
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: fieldsync
+      component: mongodb
+
+---
+# Redis PDB
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: fieldsync-redis-pdb
+  namespace: fieldsync
+  labels:
+    app: fieldsync
+    component: cache
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: fieldsync
+      component: redis
+
+---
+# Cluster Autoscaler Configuration (Node-level scaling)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cluster-autoscaler-status
+  namespace: fieldsync
+  labels:
+    app: fieldsync
+    component: cluster-autoscaling
+data:
+  nodes.max: "10"
+  nodes.min: "3"
+  scale-down-enabled: "true"
+  scale-down-delay-after-add: "10m"
+  scale-down-unneeded-time: "10m"
+  scale-down-utilization-threshold: "0.5"
+  skip-nodes-with-local-storage: "false"
+  skip-nodes-with-system-pods: "false"
+
+---
+# Priority Classes for Pod Scheduling
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: fieldsync-critical
+value: 1000
+globalDefault: false
+description: "Critical FieldSync components that should be scheduled first"
+
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: fieldsync-normal
+value: 500
+globalDefault: false
+description: "Normal FieldSync components"
+
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: fieldsync-low
+value: 100
+globalDefault: false
+description: "Low priority FieldSync components (monitoring, logging)"
+
+---
+# Resource Quotas for Auto-scaling Limits
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: fieldsync-autoscaling-quota
+  namespace: fieldsync
+spec:
+  hard:
+    # CPU limits
+    requests.cpu: "8"      # Total CPU requests
+    limits.cpu: "16"       # Total CPU limits
+    
+    # Memory limits
+    requests.memory: "16Gi"  # Total memory requests
+    limits.memory: "32Gi"    # Total memory limits
+    
+    # Pod limits
+    pods: "30"             # Maximum number of pods
+    
+    # Storage limits
+    persistentvolumeclaims: "15"
+    requests.storage: "200Gi"
+
+---
+# Limit Ranges for Individual Pods
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: fieldsync-pod-limits
+  namespace: fieldsync
+spec:
+  limits:
+  # Container limits
+  - type: Container
+    default:
+      cpu: "500m"
+      memory: "1Gi"
+    defaultRequest:
+      cpu: "100m"
+      memory: "256Mi"
+    max:
+      cpu: "2000m"
+      memory: "4Gi"
+    min:
+      cpu: "50m"
+      memory: "128Mi"
+  
+  # Pod limits
+  - type: Pod
+    max:
+      cpu: "4000m"
+      memory: "8Gi"
+    min:
+      cpu: "100m"
+      memory: "256Mi"
+  
+  # PVC limits
+  - type: PersistentVolumeClaim
+    max:
+      storage: "100Gi"
+    min:
+      storage: "1Gi"
+
+---
+# Custom Metrics API Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: custom-metrics-config
+  namespace: fieldsync
+  labels:
+    app: fieldsync
+    component: metrics
+data:
+  config.yaml: |
+    rules:
+    # HTTP request rate metric
+    - seriesQuery: 'http_requests_total{namespace!="",pod!=""}'
+      resources:
+        overrides:
+          namespace: {resource: "namespace"}
+          pod: {resource: "pod"}
+      name:
+        matches: "^http_requests_total"
+        as: "http_requests_per_second"
+      metricsQuery: 'rate(<<.Series>>{<<.LabelMatchers>>}[2m])'
+    
+    # Redis queue length metric
+    - seriesQuery: 'redis_queue_length{namespace!="",service!=""}'
+      resources:
+        overrides:
+          namespace: {resource: "namespace"}
+          service: {resource: "service"}
+      name:
+        matches: "^redis_queue_length"
+        as: "redis_queue_length"
+      metricsQuery: '<<.Series>>{<<.LabelMatchers>>}'
+    
+    # Database connection pool utilization
+    - seriesQuery: 'mongodb_connections_current{namespace!="",pod!=""}'
+      resources:
+        overrides:
+          namespace: {resource: "namespace"}
+          pod: {resource: "pod"}
+      name:
+        matches: "^mongodb_connections_current"
+        as: "database_connection_utilization"
+      metricsQuery: '(<<.Series>>{<<.LabelMatchers>>} / mongodb_connections_available{<<.LabelMatchers>>}) * 100'
+
+---
+# Load Balancer Service with Advanced Configuration
+apiVersion: v1
+kind: Service
+metadata:
+  name: fieldsync-loadbalancer
+  namespace: fieldsync
+  labels:
+    app: fieldsync
+    component: loadbalancer
+  annotations:
+    # AWS Load Balancer Controller annotations
+    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+    service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
+    service.beta.kubernetes.io/aws-load-balancer-backend-protocol: "tcp"
+    service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled: "true"
+    service.beta.kubernetes.io/aws-load-balancer-connection-draining-enabled: "true"
+    service.beta.kubernetes.io/aws-load-balancer-connection-draining-timeout: "60"
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-interval: "30"
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-timeout: "5"
+    service.beta.kubernetes.io/aws-load-balancer-healthy-threshold: "2"
+    service.beta.kubernetes.io/aws-load-balancer-unhealthy-threshold: "2"
+    
+    # GCP Load Balancer annotations
+    cloud.google.com/neg: '{"ingress": true}'
+    cloud.google.com/backend-config: '{"default": "fieldsync-backend-config"}'
+    
+    # Azure Load Balancer annotations
+    service.beta.kubernetes.io/azure-load-balancer-internal: "false"
+    service.beta.kubernetes.io/azure-load-balancer-health-probe-num-of-probe: "2"
+    service.beta.kubernetes.io/azure-load-balancer-health-probe-interval: "5"
+spec:
+  type: LoadBalancer
+  loadBalancerSourceRanges:
+  - 0.0.0.0/0  # Restrict this in production
+  selector:
+    app: fieldsync
+    component: nginx
+  ports:
+  - name: http
+    port: 80
+    targetPort: 80
+    protocol: TCP
+  - name: https
+    port: 443
+    targetPort: 443
+    protocol: TCP
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 3600
+
+---
+# Backend Configuration for GCP Load Balancer
+apiVersion: cloud.google.com/v1
+kind: BackendConfig
+metadata:
+  name: fieldsync-backend-config
+  namespace: fieldsync
+spec:
+  healthCheck:
+    checkIntervalSec: 30
+    timeoutSec: 5
+    healthyThreshold: 2
+    unhealthyThreshold: 3
+    type: HTTP
+    requestPath: /health
+    port: 80
+  connectionDraining:
+    drainingTimeoutSec: 60
+  sessionAffinity:
+    affinityType: "CLIENT_IP"
+    affinityCookieTtlSec: 3600
+  timeoutSec: 30
+
+---
+# Network Load Balancer Health Check
+apiVersion: v1
+kind: Service
+metadata:
+  name: fieldsync-health-check
+  namespace: fieldsync
+  labels:
+    app: fieldsync
+    component: health-check
+spec:
+  type: ClusterIP
+  selector:
+    app: fieldsync
+    component: nginx
+  ports:
+  - name: health
+    port: 8080
+    targetPort: 80
+    protocol: TCP
+
+---
+# Advanced Ingress with Load Balancing Configuration
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: fieldsync-advanced-ingress
+  namespace: fieldsync
+  labels:
+    app: fieldsync
+    component: ingress
+  annotations:
+    kubernetes.io/ingress.class: "nginx"
+    
+    # SSL and Security
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    
+    # Load Balancing
+    nginx.ingress.kubernetes.io/load-balance: "round_robin"
+    nginx.ingress.kubernetes.io/upstream-keepalive-connections: "32"
+    nginx.ingress.kubernetes.io/upstream-keepalive-requests: "100"
+    nginx.ingress.kubernetes.io/upstream-keepalive-timeout: "60s"
+    
+    # Rate Limiting
+    nginx.ingress.kubernetes.io/rate-limit: "100"
+    nginx.ingress.kubernetes.io/rate-limit-window: "1m"
+    nginx.ingress.kubernetes.io/rate-limit-connections: "10"
+    
+    # Timeouts
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+    
+    # Body Size
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+    
+    # Health Checks
+    nginx.ingress.kubernetes.io/upstream-health-check: "true"
+    nginx.ingress.kubernetes.io/upstream-health-check-path: "/health"
+    nginx.ingress.kubernetes.io/upstream-health-check-interval: "30s"
+    
+    # Session Affinity
+    nginx.ingress.kubernetes.io/affinity: "cookie"
+    nginx.ingress.kubernetes.io/affinity-mode: "persistent"
+    nginx.ingress.kubernetes.io/session-cookie-name: "fieldsync-session"
+    nginx.ingress.kubernetes.io/session-cookie-max-age: "3600"
+    
+    # Custom Headers
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      more_set_headers "X-Load-Balancer: nginx-ingress";
+      more_set_headers "X-Backend-Server: $upstream_addr";
+      more_set_headers "X-Response-Time: $upstream_response_time";
+      more_set_headers "X-Frame-Options: DENY";
+      more_set_headers "X-Content-Type-Options: nosniff";
+      more_set_headers "X-XSS-Protection: 1; mode=block";
+spec:
+  tls:
+  - hosts:
+    - fieldsync.example.com
+    - api.fieldsync.example.com
+    secretName: fieldsync-tls-cert
+  rules:
+  - host: fieldsync.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: fieldsync-nginx
+            port:
+              number: 80
+  - host: api.fieldsync.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: fieldsync-app
+            port:
+              number: 5000

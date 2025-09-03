@@ -1,0 +1,398 @@
+# Google Cloud Load Balancer (GCLB) Configuration
+# This file contains GCP-specific load balancer configurations
+
+# Global HTTP(S) Load Balancer with Google Cloud Armor
+apiVersion: networking.gke.io/v1
+kind: ManagedCertificate
+metadata:
+  name: fieldsync-ssl-cert
+  namespace: fieldsync
+  labels:
+    app: fieldsync
+    component: ssl
+spec:
+  domains:
+  - fieldsync.example.com
+  - api.fieldsync.example.com
+  - www.fieldsync.example.com
+
+---
+# Backend Configuration for Health Checks and Security
+apiVersion: cloud.google.com/v1
+kind: BackendConfig
+metadata:
+  name: fieldsync-backend-config
+  namespace: fieldsync
+  labels:
+    app: fieldsync
+    component: backend-config
+spec:
+  # Health Check Configuration
+  healthCheck:
+    checkIntervalSec: 30
+    timeoutSec: 5
+    healthyThreshold: 2
+    unhealthyThreshold: 3
+    type: HTTP
+    requestPath: /health
+    port: 80
+  
+  # Connection Draining
+  connectionDraining:
+    drainingTimeoutSec: 60
+  
+  # Session Affinity
+  sessionAffinity:
+    affinityType: "CLIENT_IP"
+    affinityCookieTtlSec: 3600
+  
+  # Security Policy (Google Cloud Armor)
+  securityPolicy:
+    name: "fieldsync-security-policy"
+  
+  # Timeout Settings
+  timeoutSec: 30
+  
+  # CDN Configuration
+  cdn:
+    enabled: true
+    cachePolicy:
+      includeHost: true
+      includeProtocol: true
+      includeQueryString: false
+    cacheMode: "USE_ORIGIN_HEADERS"
+    clientTtl: 3600
+    defaultTtl: 3600
+    maxTtl: 86400
+    negativeCaching: true
+    negativeCachingPolicy:
+    - code: 404
+      ttl: 120
+    - code: 500
+      ttl: 60
+  
+  # Identity-Aware Proxy (IAP)
+  iap:
+    enabled: false
+    oauthclientCredentials:
+      secretName: oauth-client-secret
+
+---
+# Frontend Configuration for Load Balancer
+apiVersion: networking.gke.io/v1beta1
+kind: FrontendConfig
+metadata:
+  name: fieldsync-frontend-config
+  namespace: fieldsync
+  labels:
+    app: fieldsync
+    component: frontend-config
+spec:
+  # SSL Policy
+  sslPolicy: "modern-ssl-policy"
+  
+  # Redirect HTTP to HTTPS
+  redirectToHttps:
+    enabled: true
+    responseCodeName: "MOVED_PERMANENTLY_DEFAULT"
+
+---
+# Ingress with Global Load Balancer
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: fieldsync-gclb-ingress
+  namespace: fieldsync
+  labels:
+    app: fieldsync
+    component: gclb-ingress
+  annotations:
+    kubernetes.io/ingress.class: "gce"
+    kubernetes.io/ingress.global-static-ip-name: "fieldsync-global-ip"
+    
+    # SSL Configuration
+    networking.gke.io/managed-certificates: "fieldsync-ssl-cert"
+    networking.gke.io/v1beta1.FrontendConfig: "fieldsync-frontend-config"
+    
+    # Backend Configuration
+    cloud.google.com/backend-config: '{"default": "fieldsync-backend-config"}'
+    cloud.google.com/neg: '{"ingress": true}'
+    
+    # Load Balancer Annotations
+    ingress.gcp.kubernetes.io/pre-shared-cert: "fieldsync-ssl-cert"
+    cloud.google.com/armor-config: '{"fieldsync-security-policy": "fieldsync-security-policy"}'
+spec:
+  rules:
+  - host: fieldsync.example.com
+    http:
+      paths:
+      # API Endpoints
+      - path: /api/*
+        pathType: ImplementationSpecific
+        backend:
+          service:
+            name: fieldsync-app
+            port:
+              number: 5000
+      # Static Assets
+      - path: /_next/static/*
+        pathType: ImplementationSpecific
+        backend:
+          service:
+            name: fieldsync-app
+            port:
+              number: 3000
+      # Main Application
+      - path: /*
+        pathType: ImplementationSpecific
+        backend:
+          service:
+            name: fieldsync-nginx
+            port:
+              number: 80
+  
+  # API Subdomain
+  - host: api.fieldsync.example.com
+    http:
+      paths:
+      - path: /*
+        pathType: ImplementationSpecific
+        backend:
+          service:
+            name: fieldsync-app
+            port:
+              number: 5000
+
+---
+# Google Cloud Armor Security Policy
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cloud-armor-policy
+  namespace: fieldsync
+  labels:
+    app: fieldsync
+    component: security-policy
+data:
+  security-policy.yaml: |
+    name: fieldsync-security-policy
+    description: Security policy for FieldSync application
+    rules:
+    # Default rule - allow all traffic
+    - priority: 2147483647
+      match:
+        versionedExpr: SRC_IPS_V1
+        config:
+          srcIpRanges:
+          - "*"
+      action: allow
+    
+    # Rate limiting rule
+    - priority: 1000
+      match:
+        versionedExpr: SRC_IPS_V1
+        config:
+          srcIpRanges:
+          - "*"
+      action: rate_based_ban
+      rateLimitOptions:
+        conformAction: allow
+        exceedAction: deny_429
+        enforceOnKey: IP
+        rateLimitThreshold:
+          count: 100
+          intervalSec: 60
+        banDurationSec: 600
+    
+    # Geographic restrictions (example: block specific countries)
+    - priority: 2000
+      match:
+        expr:
+          expression: 'origin.region_code == "CN" || origin.region_code == "RU"'
+      action: deny_403
+    
+    # SQL Injection protection
+    - priority: 3000
+      match:
+        expr:
+          expression: 'evaluatePreconfiguredExpr("sqli-stable")'
+      action: deny_403
+    
+    # XSS protection
+    - priority: 3001
+      match:
+        expr:
+          expression: 'evaluatePreconfiguredExpr("xss-stable")'
+      action: deny_403
+    
+    # Local file inclusion protection
+    - priority: 3002
+      match:
+        expr:
+          expression: 'evaluatePreconfiguredExpr("lfi-stable")'
+      action: deny_403
+    
+    # Remote code execution protection
+    - priority: 3003
+      match:
+        expr:
+          expression: 'evaluatePreconfiguredExpr("rce-stable")'
+      action: deny_403
+
+---
+# Network Endpoint Group for direct integration
+apiVersion: v1
+kind: Service
+metadata:
+  name: fieldsync-neg-service
+  namespace: fieldsync
+  labels:
+    app: fieldsync
+    component: neg-service
+  annotations:
+    cloud.google.com/neg: '{"ingress": true, "exposed_ports": {"80": {}, "5000": {}}}'
+    cloud.google.com/backend-config: '{"ports": {"80": "fieldsync-backend-config", "5000": "fieldsync-api-backend-config"}}'
+spec:
+  type: ClusterIP
+  selector:
+    app: fieldsync
+    component: application
+  ports:
+  - name: web
+    port: 80
+    targetPort: 3000
+  - name: api
+    port: 5000
+    targetPort: 5000
+
+---
+# Backend Config for API endpoints
+apiVersion: cloud.google.com/v1
+kind: BackendConfig
+metadata:
+  name: fieldsync-api-backend-config
+  namespace: fieldsync
+spec:
+  healthCheck:
+    checkIntervalSec: 30
+    timeoutSec: 5
+    healthyThreshold: 2
+    unhealthyThreshold: 3
+    type: HTTP
+    requestPath: /api/health
+    port: 5000
+  
+  connectionDraining:
+    drainingTimeoutSec: 60
+  
+  timeoutSec: 60  # Longer timeout for API requests
+  
+  # Custom request headers
+  customRequestHeaders:
+    headers:
+    - "X-Forwarded-Proto: https"
+    - "X-Load-Balancer: gcp-gclb"
+
+---
+# Regional Load Balancer for internal traffic
+apiVersion: v1
+kind: Service
+metadata:
+  name: fieldsync-ilb
+  namespace: fieldsync
+  labels:
+    app: fieldsync
+    component: internal-lb
+  annotations:
+    networking.gke.io/load-balancer-type: "Internal"
+    cloud.google.com/load-balancer-type: "Internal"
+spec:
+  type: LoadBalancer
+  loadBalancerSourceRanges:
+  - 10.0.0.0/8      # Private network range
+  - 172.16.0.0/12   # Private network range
+  - 192.168.0.0/16  # Private network range
+  selector:
+    app: fieldsync
+    component: application
+  ports:
+  - name: web
+    port: 80
+    targetPort: 3000
+  - name: api
+    port: 5000
+    targetPort: 5000
+
+---
+# Global Static IP Address
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: static-ip-config
+  namespace: fieldsync
+  labels:
+    app: fieldsync
+    component: networking
+data:
+  create-static-ip.sh: |
+    #!/bin/bash
+    # Create global static IP for load balancer
+    gcloud compute addresses create fieldsync-global-ip \
+      --global \
+      --description="Static IP for FieldSync Global Load Balancer"
+    
+    # Get the IP address
+    gcloud compute addresses describe fieldsync-global-ip \
+      --global \
+      --format="value(address)"
+
+---
+# SSL Policy for Modern TLS
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ssl-policy-config
+  namespace: fieldsync
+  labels:
+    app: fieldsync
+    component: ssl-config
+data:
+  create-ssl-policy.sh: |
+    #!/bin/bash
+    # Create modern SSL policy
+    gcloud compute ssl-policies create modern-ssl-policy \
+      --profile MODERN \
+      --min-tls-version 1.2 \
+      --description="Modern SSL policy for FieldSync"
+
+---
+# Cloud DNS Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dns-config
+  namespace: fieldsync
+  labels:
+    app: fieldsync
+    component: dns
+data:
+  dns-records.yaml: |
+    # Cloud DNS records configuration
+    records:
+    - name: fieldsync.example.com
+      type: A
+      ttl: 300
+      rrdatas:
+      - ${GLOBAL_IP_ADDRESS}
+    
+    - name: api.fieldsync.example.com
+      type: A
+      ttl: 300
+      rrdatas:
+      - ${GLOBAL_IP_ADDRESS}
+    
+    - name: www.fieldsync.example.com
+      type: CNAME
+      ttl: 300
+      rrdatas:
+      - fieldsync.example.com.

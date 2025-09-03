@@ -1,0 +1,611 @@
+// Advanced SLA Engine API Routes
+// RESTful endpoints for SLA management and monitoring
+import { Router } from 'express';
+import { AdvancedSlaEngine } from '../modules/advancedSlaEngineFacade';
+import { AdvancedSlaTemplateModel } from '../models/advancedSla';
+
+const router = Router();
+const slaEngine = new AdvancedSlaEngine();
+
+// SLA Template Management Routes
+
+/**
+ * @route GET /api/sla/templates
+ * @desc Get all SLA templates
+ */
+router.get('/templates', async (req, res) => {
+  try {
+    const { category, priority, isActive } = req.query;
+    const filters: any = {};
+    
+    if (category) filters.category = category;
+    if (priority) filters.priority = priority;
+    if (isActive !== undefined) filters.isActive = isActive === 'true';
+
+    const templates = await AdvancedSlaTemplateModel.find(filters);
+    
+    res.json({
+      success: true,
+      data: templates,
+      count: templates.length
+    });
+  } catch (error) {
+    console.error('Error fetching SLA templates:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch SLA templates',
+      error: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+/**
+ * @route POST /api/sla/templates
+ * @desc Create new SLA template
+ */
+router.post('/templates', async (req, res) => {
+  try {
+    const templateData = req.body;
+    templateData.createdBy = req.user?.id || 'system';
+    templateData.updatedBy = req.user?.id || 'system';
+    templateData.createdAt = new Date();
+    templateData.updatedAt = new Date();
+
+    const template = new AdvancedSlaTemplateModel(templateData);
+    await template.save();
+
+    res.status(201).json({
+      success: true,
+      data: template,
+      message: 'SLA template created successfully'
+    });
+  } catch (error) {
+    console.error('Error creating SLA template:', error);
+    res.status(400).json({
+      success: false,
+      message: 'Failed to create SLA template',
+      error: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+/**
+ * @route PUT /api/sla/templates/:id
+ * @desc Update SLA template
+ */
+router.put('/templates/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const updateData = req.body;
+    updateData.updatedBy = req.user?.id || 'system';
+    updateData.updatedAt = new Date();
+    updateData.version = (updateData.version || 0) + 1;
+
+    const template = await AdvancedSlaTemplateModel.findByIdAndUpdate(
+      id,
+      updateData,
+      { new: true, runValidators: true }
+    );
+
+    if (!template) {
+      return res.status(404).json({
+        success: false,
+        message: 'SLA template not found'
+      });
+    }
+
+    res.json({
+      success: true,
+      data: template,
+      message: 'SLA template updated successfully'
+    });
+  } catch (error) {
+    console.error('Error updating SLA template:', error);
+    res.status(400).json({
+      success: false,
+      message: 'Failed to update SLA template',
+      error: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+/**
+ * @route DELETE /api/sla/templates/:id
+ * @desc Delete SLA template (soft delete by setting isActive to false)
+ */
+router.delete('/templates/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const template = await AdvancedSlaTemplateModel.findByIdAndUpdate(
+      id,
+      { 
+        isActive: false,
+        updatedBy: req.user?.id || 'system',
+        updatedAt: new Date()
+      },
+      { new: true }
+    );
+
+    if (!template) {
+      return res.status(404).json({
+        success: false,
+        message: 'SLA template not found'
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'SLA template deactivated successfully'
+    });
+  } catch (error) {
+    console.error('Error deleting SLA template:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to delete SLA template',
+      error: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+// SLA Tracker Management Routes
+
+/**
+ * @route POST /api/sla/trackers
+ * @desc Create new SLA tracker for an entity
+ */
+router.post('/trackers', async (req, res) => {
+  try {
+    const { entityId, entityType, context } = req.body;
+    
+    if (!entityId || !entityType) {
+      return res.status(400).json({
+        success: false,
+        message: 'entityId and entityType are required'
+      });
+    }
+
+    context.createdBy = req.user?.id || 'system';
+    
+    const tracker = await slaEngine.createSlaTracker(entityId, entityType, context);
+
+    res.status(201).json({
+      success: true,
+      data: tracker,
+      message: 'SLA tracker created successfully'
+    });
+  } catch (error) {
+    console.error('Error creating SLA tracker:', error);
+    res.status(400).json({
+      success: false,
+      message: 'Failed to create SLA tracker',
+      error: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+/**
+ * @route PUT /api/sla/trackers/:id
+ * @desc Update SLA tracker
+ */
+router.put('/trackers/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const updates = req.body;
+    updates.updatedBy = req.user?.id || 'system';
+
+    const tracker = await slaEngine.updateSlaTracker(
+      req.body.entityId,
+      req.body.entityType,
+      updates
+    );
+
+    if (!tracker) {
+      return res.status(404).json({
+        success: false,
+        message: 'SLA tracker not found'
+      });
+    }
+
+    res.json({
+      success: true,
+      data: tracker,
+      message: 'SLA tracker updated successfully'
+    });
+  } catch (error) {
+    console.error('Error updating SLA tracker:', error);
+    res.status(400).json({
+      success: false,
+      message: 'Failed to update SLA tracker',
+      error: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+/**
+ * @route POST /api/sla/trackers/:id/pause
+ * @desc Pause SLA tracker
+ */
+router.post('/trackers/:id/pause', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { reason, category } = req.body;
+
+    if (!reason) {
+      return res.status(400).json({
+        success: false,
+        message: 'Pause reason is required'
+      });
+    }
+
+    const success = await slaEngine.pauseSlaTracker(id, reason, category, req.user?.id);
+
+    if (!success) {
+      return res.status(400).json({
+        success: false,
+        message: 'Failed to pause SLA tracker - may already be paused or not found'
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'SLA tracker paused successfully'
+    });
+  } catch (error) {
+    console.error('Error pausing SLA tracker:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to pause SLA tracker',
+      error: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+/**
+ * @route POST /api/sla/trackers/:id/resume
+ * @desc Resume SLA tracker
+ */
+router.post('/trackers/:id/resume', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const success = await slaEngine.resumeSlaTracker(id, req.user?.id);
+
+    if (!success) {
+      return res.status(400).json({
+        success: false,
+        message: 'Failed to resume SLA tracker - may not be paused or not found'
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'SLA tracker resumed successfully'
+    });
+  } catch (error) {
+    console.error('Error resuming SLA tracker:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to resume SLA tracker',
+      error: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+/**
+ * @route POST /api/sla/trackers/:id/complete
+ * @desc Complete SLA tracker (response or resolution)
+ */
+router.post('/trackers/:id/complete', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { completionType } = req.body;
+
+    if (!completionType || !['response', 'resolution', 'both'].includes(completionType)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Valid completionType is required (response, resolution, or both)'
+      });
+    }
+
+    const success = await slaEngine.completeSlaTracker(id, completionType, req.user?.id);
+
+    if (!success) {
+      return res.status(400).json({
+        success: false,
+        message: 'Failed to complete SLA tracker - not found'
+      });
+    }
+
+    res.json({
+      success: true,
+      message: `SLA ${completionType} completed successfully`
+    });
+  } catch (error) {
+    console.error('Error completing SLA tracker:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to complete SLA tracker',
+      error: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+/**
+ * @route GET /api/sla/trackers/:id
+ * @desc Get SLA tracker by ID
+ */
+router.get('/trackers/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const tracker = await slaEngine.getSlaStatus(id);
+
+    if (!tracker) {
+      return res.status(404).json({
+        success: false,
+        message: 'SLA tracker not found'
+      });
+    }
+
+    res.json({
+      success: true,
+      data: tracker
+    });
+  } catch (error) {
+    console.error('Error fetching SLA tracker:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch SLA tracker',
+      error: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+/**
+ * @route GET /api/sla/trackers
+ * @desc Get all SLA trackers with filtering
+ */
+router.get('/trackers', async (req, res) => {
+  try {
+    const { status, assignedTo, entityType, limit, offset } = req.query;
+
+    let trackers;
+    if (status === 'active') {
+      trackers = await slaEngine.getAllActiveSlas();
+    } else {
+      // For now, return all active SLAs as default
+      trackers = await slaEngine.getAllActiveSlas();
+    }
+
+    // Apply filters
+    if (assignedTo) {
+      trackers = trackers.filter(t => t.assignedTo === assignedTo);
+    }
+    if (entityType) {
+      trackers = trackers.filter(t => t.entityType === entityType);
+    }
+
+    // Apply pagination
+    const limitNum = parseInt(limit as string) || 50;
+    const offsetNum = parseInt(offset as string) || 0;
+    const paginatedTrackers = trackers.slice(offsetNum, offsetNum + limitNum);
+
+    res.json({
+      success: true,
+      data: paginatedTrackers,
+      count: paginatedTrackers.length,
+      total: trackers.length,
+      pagination: {
+        limit: limitNum,
+        offset: offsetNum,
+        hasMore: offsetNum + limitNum < trackers.length
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching SLA trackers:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch SLA trackers',
+      error: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+// Monitoring and Analytics Routes
+
+/**
+ * @route GET /api/sla/dashboard
+ * @desc Get SLA dashboard data
+ */
+router.get('/dashboard', async (req, res) => {
+  try {
+    const report = await slaEngine.generateReport();
+
+    res.json({
+      success: true,
+      data: report
+    });
+  } catch (error) {
+    console.error('Error generating SLA dashboard:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to generate SLA dashboard',
+      error: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+/**
+ * @route GET /api/sla/breached
+ * @desc Get all breached SLAs
+ */
+router.get('/breached', async (req, res) => {
+  try {
+    const breachedSlas = await slaEngine.getBreachedSlas();
+
+    res.json({
+      success: true,
+      data: breachedSlas,
+      count: breachedSlas.length
+    });
+  } catch (error) {
+    console.error('Error fetching breached SLAs:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch breached SLAs',
+      error: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+/**
+ * @route GET /api/sla/at-risk
+ * @desc Get SLAs at risk of breach
+ */
+router.get('/at-risk', async (req, res) => {
+  try {
+    const { threshold } = req.query;
+    const riskThreshold = parseInt(threshold as string) || 70;
+    
+    const atRiskSlas = await slaEngine.getAtRiskSlas(riskThreshold);
+
+    res.json({
+      success: true,
+      data: atRiskSlas,
+      count: atRiskSlas.length,
+      riskThreshold
+    });
+  } catch (error) {
+    console.error('Error fetching at-risk SLAs:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch at-risk SLAs',
+      error: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+/**
+ * @route GET /api/sla/metrics
+ * @desc Get SLA performance metrics
+ */
+router.get('/metrics', async (req, res) => {
+  try {
+    const { startDate, endDate, entityType, assignedTo } = req.query;
+    
+    const filters: any = {};
+    if (startDate) filters.startDate = new Date(startDate as string);
+    if (endDate) filters.endDate = new Date(endDate as string);
+    if (entityType) filters.entityType = entityType;
+    if (assignedTo) filters.assignedTo = assignedTo;
+
+    const report = await slaEngine.generateSlaReport(filters);
+
+    res.json({
+      success: true,
+      data: report
+    });
+  } catch (error) {
+    console.error('Error fetching SLA metrics:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch SLA metrics',
+      error: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+// Administrative Routes
+
+/**
+ * @route POST /api/sla/monitoring/start
+ * @desc Start SLA monitoring
+ */
+router.post('/monitoring/start', async (req, res) => {
+  try {
+    const { intervalMinutes } = req.body;
+    await slaEngine.startMonitoring(intervalMinutes || 5);
+
+    res.json({
+      success: true,
+      message: `SLA monitoring started with ${intervalMinutes || 5} minute intervals`
+    });
+  } catch (error) {
+    console.error('Error starting SLA monitoring:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to start SLA monitoring',
+      error: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+/**
+ * @route POST /api/sla/monitoring/stop
+ * @desc Stop SLA monitoring
+ */
+router.post('/monitoring/stop', async (req, res) => {
+  try {
+    await slaEngine.stopMonitoring();
+
+    res.json({
+      success: true,
+      message: 'SLA monitoring stopped'
+    });
+  } catch (error) {
+    console.error('Error stopping SLA monitoring:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to stop SLA monitoring',
+      error: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+/**
+ * @route GET /api/sla/health
+ * @desc Get SLA engine health status
+ */
+router.get('/health', async (req, res) => {
+  try {
+    const status = await slaEngine.getEngineStatus();
+
+    res.json({
+      success: true,
+      data: status
+    });
+  } catch (error) {
+    console.error('Error checking SLA engine health:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to check SLA engine health',
+      error: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+/**
+ * @route POST /api/sla/cleanup
+ * @desc Cleanup old SLA records
+ */
+router.post('/cleanup', async (req, res) => {
+  try {
+    const { olderThanDays } = req.body;
+    const cleanedCount = await slaEngine.cleanupOldSlas(olderThanDays || 90);
+
+    res.json({
+      success: true,
+      message: `Cleaned up ${cleanedCount} old SLA records`,
+      cleanedCount
+    });
+  } catch (error) {
+    console.error('Error cleaning up SLA records:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to cleanup SLA records',
+      error: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+export default router;

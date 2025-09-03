@@ -1,0 +1,49 @@
+// Facial Recognition Attendance Routes
+import express from 'express';
+import FacialRecognition from '../models/facialRecognition';
+import { requireAuth, requireRole } from '../modules/authentication';
+
+const router = express.Router();
+
+// POST /facial-recognition/register - Register facial data for a staff member (FieldTech, SiteStaff)
+router.post('/register', requireAuth, requireRole(['FieldTech', 'SiteStaff']), async (req, res) => {
+  try {
+    const { staffId, faceEncoding } = req.body;
+    const record = new FacialRecognition({ staffId, faceEncoding, attendanceLogs: [] });
+    await record.save();
+    res.status(201).json({ message: 'Facial data registered', id: record._id });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to register facial data' });
+  }
+});
+
+// POST /facial-recognition/verify - Verify face and log attendance (FieldTech, SiteStaff)
+router.post('/verify', requireAuth, requireRole(['FieldTech', 'SiteStaff']), async (req, res) => {
+  try {
+    const { staffId, faceEncoding, location } = req.body;
+    // In production, use a proper facial recognition library to compare encodings
+    const record = await FacialRecognition.findOne({ staffId });
+    if (!record) return res.status(404).json({ error: 'Staff not found' });
+    // Dummy check: compare encodings directly (replace with real comparison)
+    const verified = record.faceEncoding === faceEncoding;
+    record.attendanceLogs.push({ timestamp: new Date(), location, verified });
+    await record.save();
+    res.json({ verified });
+  } catch (err) {
+    res.status(500).json({ error: 'Verification failed' });
+  }
+});
+
+// GET /facial-recognition/logs/:staffId - Get attendance logs for a staff member (Supervisor, Admin, SiteStaff)
+router.get('/logs/:staffId', requireAuth, requireRole(['Supervisor', 'Admin', 'SiteStaff']), async (req, res) => {
+  try {
+    const { staffId } = req.params;
+    const record = await FacialRecognition.findOne({ staffId });
+    if (!record) return res.status(404).json({ error: 'Staff not found' });
+    res.json({ attendanceLogs: record.attendanceLogs });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch logs' });
+  }
+});
+
+export default router;

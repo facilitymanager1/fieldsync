@@ -1,0 +1,391 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fieldsync-app
+  namespace: fieldsync
+  labels:
+    app: fieldsync
+    component: application
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: fieldsync
+      component: application
+  template:
+    metadata:
+      labels:
+        app: fieldsync
+        component: application
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9464"
+        prometheus.io/path: "/metrics"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        fsGroup: 1001
+      containers:
+      - name: fieldsync-app
+        image: fieldsync:latest  # Replace with your actual image
+        ports:
+        - containerPort: 3000
+          name: web
+          protocol: TCP
+        - containerPort: 5000
+          name: api
+          protocol: TCP
+        - containerPort: 9464
+          name: metrics
+          protocol: TCP
+        env:
+        # Configuration from ConfigMap
+        - name: NODE_ENV
+          valueFrom:
+            configMapKeyRef:
+              name: fieldsync-config
+              key: NODE_ENV
+        - name: PORT
+          valueFrom:
+            configMapKeyRef:
+              name: fieldsync-config
+              key: PORT
+        - name: BACKEND_PORT
+          valueFrom:
+            configMapKeyRef:
+              name: fieldsync-config
+              key: BACKEND_PORT
+        
+        # Database Configuration
+        - name: MONGODB_URI
+          valueFrom:
+            secretKeyRef:
+              name: mongodb-connection
+              key: MONGODB_URI
+        - name: DB_MAX_POOL_SIZE
+          valueFrom:
+            configMapKeyRef:
+              name: fieldsync-config
+              key: DB_MAX_POOL_SIZE
+        - name: DB_MIN_POOL_SIZE
+          valueFrom:
+            configMapKeyRef:
+              name: fieldsync-config
+              key: DB_MIN_POOL_SIZE
+        
+        # Redis Configuration
+        - name: REDIS_URL
+          valueFrom:
+            secretKeyRef:
+              name: redis-connection
+              key: REDIS_URL
+        - name: REDIS_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: fieldsync-config
+              key: REDIS_HOST
+        - name: REDIS_PORT
+          valueFrom:
+            configMapKeyRef:
+              name: fieldsync-config
+              key: REDIS_PORT
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: fieldsync-secrets
+              key: REDIS_PASSWORD
+        
+        # Security Configuration
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: fieldsync-secrets
+              key: JWT_SECRET
+        - name: JWT_REFRESH_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: fieldsync-secrets
+              key: JWT_REFRESH_SECRET
+        - name: ENCRYPTION_MASTER_KEY
+          valueFrom:
+            secretKeyRef:
+              name: fieldsync-secrets
+              key: ENCRYPTION_MASTER_KEY
+        - name: CSRF_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: fieldsync-secrets
+              key: CSRF_SECRET
+        
+        # Cache Configuration
+        - name: CACHE_TTL
+          valueFrom:
+            configMapKeyRef:
+              name: fieldsync-config
+              key: CACHE_TTL
+        - name: ENABLE_CACHE_COMPRESSION
+          valueFrom:
+            configMapKeyRef:
+              name: fieldsync-config
+              key: ENABLE_CACHE_COMPRESSION
+        
+        # Performance Configuration
+        - name: UV_THREADPOOL_SIZE
+          valueFrom:
+            configMapKeyRef:
+              name: fieldsync-config
+              key: UV_THREADPOOL_SIZE
+        - name: NODE_OPTIONS
+          value: "--max-old-space-size=1024"
+        
+        # Monitoring Configuration
+        - name: LOG_LEVEL
+          valueFrom:
+            configMapKeyRef:
+              name: fieldsync-config
+              key: LOG_LEVEL
+        - name: ENABLE_METRICS
+          valueFrom:
+            configMapKeyRef:
+              name: fieldsync-config
+              key: ENABLE_METRICS
+        
+        # External API Keys
+        - name: KARZA_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: fieldsync-secrets
+              key: KARZA_API_KEY
+        - name: GOOGLE_MAPS_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: fieldsync-secrets
+              key: GOOGLE_MAPS_API_KEY
+        
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        
+        # Health checks
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 3000
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+        
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 3000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        
+        # Startup probe for slower initialization
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 3000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 10
+        
+        # Volume mounts
+        volumeMounts:
+        - name: uploads
+          mountPath: /app/uploads
+        - name: logs
+          mountPath: /app/logs
+        - name: tmp
+          mountPath: /tmp
+      
+      # Init container for database migrations
+      initContainers:
+      - name: db-migrate
+        image: fieldsync:latest
+        command: ['npm', 'run', 'db:migrate']
+        env:
+        - name: MONGODB_URI
+          valueFrom:
+            secretKeyRef:
+              name: mongodb-connection
+              key: MONGODB_URI
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "200m"
+      
+      volumes:
+      - name: uploads
+        persistentVolumeClaim:
+          claimName: fieldsync-uploads-pvc
+      - name: logs
+        persistentVolumeClaim:
+          claimName: fieldsync-logs-pvc
+      - name: tmp
+        emptyDir: {}
+      
+      # Pod affinity and anti-affinity
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - fieldsync
+                - key: component
+                  operator: In
+                  values:
+                  - application
+              topologyKey: kubernetes.io/hostname
+
+---
+# Persistent Volume Claims for application data
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: fieldsync-uploads-pvc
+  namespace: fieldsync
+  labels:
+    app: fieldsync
+    component: application
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 50Gi
+  storageClassName: nfs  # Use a storage class that supports ReadWriteMany
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: fieldsync-logs-pvc
+  namespace: fieldsync
+  labels:
+    app: fieldsync
+    component: application
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: nfs
+
+---
+# Application Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: fieldsync-app
+  namespace: fieldsync
+  labels:
+    app: fieldsync
+    component: application
+spec:
+  type: ClusterIP
+  selector:
+    app: fieldsync
+    component: application
+  ports:
+  - port: 3000
+    targetPort: 3000
+    name: web
+    protocol: TCP
+  - port: 5000
+    targetPort: 5000
+    name: api
+    protocol: TCP
+
+---
+# Metrics Service for Prometheus
+apiVersion: v1
+kind: Service
+metadata:
+  name: fieldsync-app-metrics
+  namespace: fieldsync
+  labels:
+    app: fieldsync
+    component: application
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "9464"
+    prometheus.io/path: "/metrics"
+spec:
+  type: ClusterIP
+  selector:
+    app: fieldsync
+    component: application
+  ports:
+  - port: 9464
+    targetPort: 9464
+    name: metrics
+    protocol: TCP
+
+---
+# Horizontal Pod Autoscaler
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: fieldsync-app-hpa
+  namespace: fieldsync
+  labels:
+    app: fieldsync
+    component: application
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: fieldsync-app
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Percent
+        value: 10
+        periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+      - type: Percent
+        value: 100
+        periodSeconds: 15

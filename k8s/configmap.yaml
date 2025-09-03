@@ -1,0 +1,219 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fieldsync-config
+  namespace: fieldsync
+  labels:
+    app: fieldsync
+data:
+  # Application Configuration
+  NODE_ENV: "production"
+  PORT: "3000"
+  BACKEND_PORT: "5000"
+  
+  # Database Configuration
+  DB_MAX_POOL_SIZE: "20"
+  DB_MIN_POOL_SIZE: "5"
+  DB_MAX_IDLE_TIME: "300000"
+  DB_WAIT_QUEUE_TIMEOUT: "30000"
+  DB_SERVER_SELECTION_TIMEOUT: "30000"
+  DB_HEARTBEAT_FREQUENCY: "10000"
+  DB_MAX_CONNECTING: "5"
+  DB_BUFFER_MAX_ENTRIES: "0"
+  DB_READ_PREFERENCE: "primary"
+  
+  # Redis Configuration
+  REDIS_HOST: "fieldsync-redis"
+  REDIS_PORT: "6379"
+  REDIS_DB: "0"
+  REDIS_MAX_RETRIES: "3"
+  REDIS_RETRY_DELAY: "100"
+  
+  # Cache Configuration
+  CACHE_TTL: "3600"
+  CACHE_KEY_PREFIX: "fieldsync:"
+  ENABLE_CACHE_COMPRESSION: "true"
+  ENABLE_CACHE_METRICS: "true"
+  
+  # Security Configuration
+  RATE_LIMIT_WINDOW_MS: "900000"
+  RATE_LIMIT_MAX_REQUESTS: "100"
+  RATE_LIMIT_LOGIN_MAX: "5"
+  RATE_LIMIT_LOGIN_WINDOW: "900000"
+  ENABLE_CSRF_PROTECTION: "true"
+  ENABLE_RATE_LIMITING: "true"
+  ENABLE_SECURITY_HEADERS: "true"
+  ENABLE_FIELD_ENCRYPTION: "true"
+  
+  # JWT Configuration
+  JWT_ACCESS_EXPIRY: "15m"
+  JWT_REFRESH_EXPIRY: "7d"
+  
+  # Encryption Configuration
+  ENCRYPTION_ALGORITHM: "aes-256-gcm"
+  PBKDF2_ITERATIONS: "100000"
+  
+  # Logging Configuration
+  LOG_LEVEL: "info"
+  LOG_MAX_SIZE: "10m"
+  LOG_MAX_FILES: "5"
+  ENABLE_LOG_ROTATION: "true"
+  ENABLE_METRICS: "true"
+  LOG_POOL_METRICS: "false"
+  
+  # Health Check Configuration
+  DB_HEALTH_CHECK_INTERVAL: "60000"
+  HEALTH_CHECK_TIMEOUT: "5000"
+  
+  # File Upload Configuration
+  MAX_FILE_SIZE: "50mb"
+  ALLOWED_FILE_TYPES: "jpg,jpeg,png,pdf,doc,docx"
+  
+  # Performance Configuration
+  UV_THREADPOOL_SIZE: "16"
+  DB_MAX_RECONNECT_ATTEMPTS: "10"
+  DB_RECONNECT_INTERVAL: "5000"
+  
+  # Audit Configuration
+  ENABLE_AUDIT_LOGGING: "true"
+  AUDIT_LOG_RETENTION_DAYS: "90"
+  
+  # Timezone Configuration
+  TZ: "Asia/Kolkata"
+  DEFAULT_LANGUAGE: "en"
+  SUPPORTED_LANGUAGES: "en,hi,ta,te,kn,ml,gu,mr,bn"
+  DATE_FORMAT: "DD/MM/YYYY"
+  TIME_FORMAT: "HH:mm:ss"
+
+---
+# Nginx Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-config
+  namespace: fieldsync
+  labels:
+    app: fieldsync
+data:
+  nginx.conf: |
+    user nginx;
+    worker_processes auto;
+    error_log /var/log/nginx/error.log warn;
+    pid /var/run/nginx.pid;
+
+    events {
+        worker_connections 1024;
+        use epoll;
+        multi_accept on;
+    }
+
+    http {
+        include /etc/nginx/mime.types;
+        default_type application/octet-stream;
+
+        log_format main '$remote_addr - $remote_user [$time_local] "$request" '
+                        '$status $body_bytes_sent "$http_referer" '
+                        '"$http_user_agent" "$http_x_forwarded_for" '
+                        'rt=$request_time uct="$upstream_connect_time" '
+                        'uht="$upstream_header_time" urt="$upstream_response_time"';
+
+        access_log /var/log/nginx/access.log main;
+
+        sendfile on;
+        tcp_nopush on;
+        tcp_nodelay on;
+        keepalive_timeout 65;
+        types_hash_max_size 2048;
+        client_max_body_size 50M;
+
+        gzip on;
+        gzip_vary on;
+        gzip_min_length 10240;
+        gzip_proxied expired no-cache no-store private must-revalidate auth;
+        gzip_types
+            text/plain
+            text/css
+            text/xml
+            text/javascript
+            application/javascript
+            application/json
+            application/xml
+            image/svg+xml;
+
+        # Security Headers
+        add_header X-Frame-Options DENY;
+        add_header X-Content-Type-Options nosniff;
+        add_header X-XSS-Protection "1; mode=block";
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+
+        # Rate Limiting
+        limit_req_zone $binary_remote_addr zone=api:10m rate=10r/s;
+        limit_req_zone $binary_remote_addr zone=login:10m rate=1r/s;
+        limit_conn_zone $binary_remote_addr zone=conn_limit_per_ip:10m;
+
+        upstream fieldsync_app {
+            least_conn;
+            server fieldsync-app:3000 max_fails=3 fail_timeout=30s;
+            keepalive 32;
+        }
+
+        upstream fieldsync_api {
+            least_conn;
+            server fieldsync-app:5000 max_fails=3 fail_timeout=30s;
+            keepalive 32;
+        }
+
+        server {
+            listen 80;
+            server_name _;
+            
+            limit_conn conn_limit_per_ip 20;
+
+            location /api/ {
+                limit_req zone=api burst=20 nodelay;
+                
+                proxy_pass http://fieldsync_api;
+                proxy_http_version 1.1;
+                proxy_set_header Upgrade $http_upgrade;
+                proxy_set_header Connection 'upgrade';
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+                proxy_cache_bypass $http_upgrade;
+                
+                proxy_connect_timeout 60s;
+                proxy_send_timeout 60s;
+                proxy_read_timeout 60s;
+            }
+
+            location /api/auth/ {
+                limit_req zone=login burst=5 nodelay;
+                
+                proxy_pass http://fieldsync_api;
+                proxy_http_version 1.1;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+            }
+
+            location / {
+                proxy_pass http://fieldsync_app;
+                proxy_http_version 1.1;
+                proxy_set_header Upgrade $http_upgrade;
+                proxy_set_header Connection 'upgrade';
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+                proxy_cache_bypass $http_upgrade;
+            }
+
+            location /health {
+                access_log off;
+                return 200 "healthy\n";
+                add_header Content-Type text/plain;
+            }
+        }
+    }

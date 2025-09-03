@@ -1,0 +1,272 @@
+# AWS Application Load Balancer (ALB) Configuration
+# This file contains AWS-specific load balancer configurations
+
+# ALB Ingress Controller Service Account
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aws-load-balancer-controller
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: aws-load-balancer-controller
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::ACCOUNT-ID:role/AmazonEKSLoadBalancerControllerRole
+
+---
+# ALB Ingress for FieldSync
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: fieldsync-alb-ingress
+  namespace: fieldsync
+  labels:
+    app: fieldsync
+    component: alb-ingress
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    
+    # Load Balancer Settings
+    alb.ingress.kubernetes.io/load-balancer-name: fieldsync-alb
+    alb.ingress.kubernetes.io/group.name: fieldsync
+    alb.ingress.kubernetes.io/group.order: '1'
+    
+    # Health Checks
+    alb.ingress.kubernetes.io/healthcheck-path: /health
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: '30'
+    alb.ingress.kubernetes.io/healthcheck-timeout-seconds: '5'
+    alb.ingress.kubernetes.io/healthy-threshold-count: '2'
+    alb.ingress.kubernetes.io/unhealthy-threshold-count: '3'
+    alb.ingress.kubernetes.io/healthcheck-protocol: HTTP
+    alb.ingress.kubernetes.io/healthcheck-port: traffic-port
+    
+    # SSL/TLS Configuration
+    alb.ingress.kubernetes.io/ssl-redirect: '443'
+    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:region:account:certificate/certificate-id
+    alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS-1-2-2017-01
+    
+    # Target Group Settings
+    alb.ingress.kubernetes.io/target-group-attributes: |
+      stickiness.enabled=true,
+      stickiness.lb_cookie.duration_seconds=3600,
+      deregistration_delay.timeout_seconds=60,
+      load_balancing.algorithm.type=round_robin
+    
+    # Access Logs
+    alb.ingress.kubernetes.io/load-balancer-attributes: |
+      access_logs.s3.enabled=true,
+      access_logs.s3.bucket=your-alb-logs-bucket,
+      access_logs.s3.prefix=fieldsync-alb,
+      idle_timeout.timeout_seconds=60
+    
+    # Security Groups
+    alb.ingress.kubernetes.io/security-groups: sg-xxxxxxxxx,sg-yyyyyyyyy
+    
+    # Subnets
+    alb.ingress.kubernetes.io/subnets: subnet-xxxxxxxx,subnet-yyyyyyyy
+    
+    # WAF Integration
+    alb.ingress.kubernetes.io/wafv2-acl-arn: arn:aws:wafv2:region:account:regional/webacl/fieldsync-waf/xxxxxxxx
+    
+    # Tags
+    alb.ingress.kubernetes.io/tags: |
+      Environment=production,
+      Application=fieldsync,
+      Team=platform
+spec:
+  rules:
+  - host: fieldsync.example.com
+    http:
+      paths:
+      # API Routes
+      - path: /api
+        pathType: Prefix
+        backend:
+          service:
+            name: fieldsync-app
+            port:
+              number: 5000
+      # WebSocket Routes
+      - path: /socket.io
+        pathType: Prefix
+        backend:
+          service:
+            name: fieldsync-app
+            port:
+              number: 5000
+      # Main Application
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: fieldsync-nginx
+            port:
+              number: 80
+
+---
+# Network Load Balancer for TCP traffic
+apiVersion: v1
+kind: Service
+metadata:
+  name: fieldsync-nlb
+  namespace: fieldsync
+  labels:
+    app: fieldsync
+    component: nlb
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: "external"
+    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: "ip"
+    service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
+    service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled: "true"
+    
+    # Health Checks
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-protocol: "HTTP"
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-path: "/health"
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-interval: "30"
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-timeout: "5"
+    service.beta.kubernetes.io/aws-load-balancer-healthy-threshold: "2"
+    service.beta.kubernetes.io/aws-load-balancer-unhealthy-threshold: "3"
+    
+    # Access Logs
+    service.beta.kubernetes.io/aws-load-balancer-access-log-enabled: "true"
+    service.beta.kubernetes.io/aws-load-balancer-access-log-s3-bucket-name: "your-nlb-logs-bucket"
+    service.beta.kubernetes.io/aws-load-balancer-access-log-s3-bucket-prefix: "fieldsync-nlb"
+    
+    # Security Groups
+    service.beta.kubernetes.io/aws-load-balancer-security-groups: "sg-xxxxxxxxx"
+    
+    # Subnets
+    service.beta.kubernetes.io/aws-load-balancer-subnets: "subnet-xxxxxxxx,subnet-yyyyyyyy"
+    
+    # Tags
+    service.beta.kubernetes.io/aws-load-balancer-additional-resource-tags: "Environment=production,Application=fieldsync"
+spec:
+  type: LoadBalancer
+  selector:
+    app: fieldsync
+    component: nginx
+  ports:
+  - name: http
+    port: 80
+    targetPort: 80
+    protocol: TCP
+  - name: https
+    port: 443
+    targetPort: 443
+    protocol: TCP
+
+---
+# Target Group Binding for direct ALB integration
+apiVersion: elbv2.k8s.aws/v1beta1
+kind: TargetGroupBinding
+metadata:
+  name: fieldsync-app-tgb
+  namespace: fieldsync
+spec:
+  serviceRef:
+    name: fieldsync-app
+    port: 5000
+  targetGroupARN: arn:aws:elasticloadbalancing:region:account:targetgroup/fieldsync-api-tg/xxxxxxxx
+  targetType: ip
+
+---
+# Security Group Policy for ALB
+apiVersion: vpcresources.k8s.aws/v1beta1
+kind: SecurityGroupPolicy
+metadata:
+  name: fieldsync-alb-sg-policy
+  namespace: fieldsync
+spec:
+  podSelector:
+    matchLabels:
+      app: fieldsync
+  securityGroups:
+    groupIds:
+    - sg-xxxxxxxxx  # ALB Security Group
+    - sg-yyyyyyyyy  # Application Security Group
+
+---
+# WAF Web ACL for Application Protection
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fieldsync-waf-rules
+  namespace: fieldsync
+  labels:
+    app: fieldsync
+    component: security
+data:
+  waf-rules.json: |
+    {
+      "Name": "FieldSyncWebACL",
+      "Scope": "REGIONAL",
+      "DefaultAction": {
+        "Allow": {}
+      },
+      "Rules": [
+        {
+          "Name": "RateLimitRule",
+          "Priority": 1,
+          "Statement": {
+            "RateBasedStatement": {
+              "Limit": 2000,
+              "AggregateKeyType": "IP"
+            }
+          },
+          "Action": {
+            "Block": {}
+          }
+        },
+        {
+          "Name": "IPWhitelistRule",
+          "Priority": 2,
+          "Statement": {
+            "IPSetReferenceStatement": {
+              "ARN": "arn:aws:wafv2:region:account:regional/ipset/allowed-ips/xxxxxxxx"
+            }
+          },
+          "Action": {
+            "Allow": {}
+          }
+        },
+        {
+          "Name": "SQLInjectionRule",
+          "Priority": 3,
+          "Statement": {
+            "ManagedRuleGroupStatement": {
+              "VendorName": "AWS",
+              "Name": "AWSManagedRulesKnownBadInputsRuleSet"
+            }
+          },
+          "Action": {
+            "Block": {}
+          }
+        }
+      ]
+    }
+
+---
+# CloudWatch Log Group for ALB Access Logs
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cloudwatch-config
+  namespace: fieldsync
+  labels:
+    app: fieldsync
+    component: logging
+data:
+  log-groups.json: |
+    {
+      "logGroups": [
+        {
+          "logGroupName": "/aws/elb/fieldsync-alb",
+          "retentionInDays": 30
+        },
+        {
+          "logGroupName": "/aws/elb/fieldsync-nlb",
+          "retentionInDays": 30
+        }
+      ]
+    }

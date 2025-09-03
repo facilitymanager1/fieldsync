@@ -1,0 +1,97 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+metadata:
+  name: fieldsync-production
+  namespace: fieldsync
+
+# Namespace for all resources
+namespace: fieldsync
+
+# Resources to deploy
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - secrets.yaml
+  - mongodb.yaml
+  - redis.yaml
+  - application.yaml
+  - nginx.yaml
+  - monitoring.yaml
+
+# Common labels for all resources
+commonLabels:
+  app: fieldsync
+  version: v1.0.0
+  environment: production
+
+# Common annotations
+commonAnnotations:
+  contact: "admin@fieldsync.com"
+  documentation: "https://docs.fieldsync.com"
+  source: "https://github.com/fieldsync/fieldsync"
+
+# Images to use (customize for your registry)
+images:
+  - name: fieldsync
+    newName: your-registry/fieldsync
+    newTag: latest
+
+# ConfigMap generators for dynamic configuration
+configMapGenerator:
+  - name: build-info
+    literals:
+      - BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+      - GIT_COMMIT=$(git rev-parse HEAD)
+      - GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+      - VERSION=v1.0.0
+
+# Secret generators (use for additional secrets)
+secretGenerator:
+  - name: additional-secrets
+    literals:
+      - API_KEY=your-additional-api-key
+
+# Patches for environment-specific customizations
+patches:
+  # Patch for resource limits in production
+  - target:
+      kind: Deployment
+      name: fieldsync-app
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/memory
+        value: "2Gi"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/cpu
+        value: "1000m"
+
+  # Patch for replica count in production
+  - target:
+      kind: Deployment
+      name: fieldsync-app
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 5
+
+# Transformers
+transformers:
+  # Add resource requirements for all containers
+  - |-
+    apiVersion: builtin
+    kind: PatchTransformer
+    metadata:
+      name: add-resource-requirements
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/resources
+        value:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "200m"
+    target:
+      kind: Deployment

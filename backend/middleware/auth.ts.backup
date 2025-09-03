@@ -1,0 +1,45 @@
+import { Request, Response, NextFunction } from 'express';
+
+// Extended Request interface to include user
+export interface AuthenticatedRequest extends Request {
+  user?: {
+    id: string;
+    username: string;
+    name: string;
+    role: string;
+  };
+}
+
+// Middleware to require authentication
+export function requireAuth(req: AuthenticatedRequest, res: Response, next: NextFunction) {
+  // Basic auth check - implement your actual authentication logic
+  const authHeader = req.headers.authorization;
+  if (!authHeader) {
+    return res.status(401).json({ error: 'No authorization header' });
+  }
+  
+  // Mock user for development - replace with real auth
+  req.user = {
+    id: '1',
+    username: 'admin',
+    name: 'Admin User',
+    role: 'Admin'
+  };
+  
+  next();
+}
+
+// Middleware to require specific roles
+export function requireRole(roles: string[]) {
+  return (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Not authenticated' });
+    }
+    
+    if (!roles.includes(req.user.role)) {
+      return res.status(403).json({ error: 'Insufficient permissions' });
+    }
+    
+    next();
+  };
+}

@@ -1,0 +1,532 @@
+# Azure Application Load Balancer Configuration
+# This file contains Azure-specific load balancer configurations
+
+# Azure Load Balancer with Application Gateway
+apiVersion: v1
+kind: Service
+metadata:
+  name: fieldsync-azure-lb
+  namespace: fieldsync
+  labels:
+    app: fieldsync
+    component: azure-lb
+  annotations:
+    # Azure Load Balancer specific annotations
+    service.beta.kubernetes.io/azure-load-balancer-internal: "false"
+    service.beta.kubernetes.io/azure-load-balancer-mode: "auto"
+    service.beta.kubernetes.io/azure-load-balancer-health-probe-num-of-probe: "2"
+    service.beta.kubernetes.io/azure-load-balancer-health-probe-interval: "5"
+    service.beta.kubernetes.io/azure-load-balancer-health-probe-request-path: "/health"
+    
+    # Session affinity
+    service.beta.kubernetes.io/azure-load-balancer-enable-high-availability-ports: "false"
+    
+    # Public IP configuration
+    service.beta.kubernetes.io/azure-dns-label-name: "fieldsync-prod"
+    service.beta.kubernetes.io/azure-load-balancer-resource-group: "fieldsync-infrastructure"
+    
+    # Additional tags
+    service.beta.kubernetes.io/azure-shared-securityrule: "false"
+    service.beta.kubernetes.io/azure-allowed-service-tags: "Internet"
+spec:
+  type: LoadBalancer
+  loadBalancerSourceRanges:
+  - 0.0.0.0/0  # Restrict this in production
+  selector:
+    app: fieldsync
+    component: nginx
+  ports:
+  - name: http
+    port: 80
+    targetPort: 80
+    protocol: TCP
+  - name: https
+    port: 443
+    targetPort: 443
+    protocol: TCP
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 3600
+
+---
+# Application Gateway Ingress Controller
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: fieldsync-appgw-ingress
+  namespace: fieldsync
+  labels:
+    app: fieldsync
+    component: appgw-ingress
+  annotations:
+    kubernetes.io/ingress.class: azure/application-gateway
+    
+    # Application Gateway specific settings
+    appgw.ingress.kubernetes.io/backend-protocol: "http"
+    appgw.ingress.kubernetes.io/request-timeout: "60"
+    appgw.ingress.kubernetes.io/connection-draining: "true"
+    appgw.ingress.kubernetes.io/connection-draining-timeout: "60"
+    
+    # SSL Configuration
+    appgw.ingress.kubernetes.io/ssl-redirect: "true"
+    appgw.ingress.kubernetes.io/appgw-ssl-certificate: "fieldsync-ssl-cert"
+    
+    # Health Probes
+    appgw.ingress.kubernetes.io/health-probe-hostname: "fieldsync.example.com"
+    appgw.ingress.kubernetes.io/health-probe-path: "/health"
+    appgw.ingress.kubernetes.io/health-probe-interval: "30"
+    appgw.ingress.kubernetes.io/health-probe-timeout: "5"
+    appgw.ingress.kubernetes.io/health-probe-unhealthy-threshold: "3"
+    
+    # Cookie-based affinity
+    appgw.ingress.kubernetes.io/cookie-based-affinity: "Enabled"
+    appgw.ingress.kubernetes.io/affinity-cookie-name: "ApplicationGatewayAffinity"
+    
+    # WAF Policy
+    appgw.ingress.kubernetes.io/waf-policy-for-path: "/subscriptions/sub-id/resourceGroups/rg-name/providers/Microsoft.Network/ApplicationGatewayWebApplicationFirewallPolicies/fieldsync-waf"
+    
+    # Custom headers
+    appgw.ingress.kubernetes.io/backend-hostname: "fieldsync.example.com"
+    appgw.ingress.kubernetes.io/override-frontend-port: "443"
+spec:
+  tls:
+  - hosts:
+    - fieldsync.example.com
+    - api.fieldsync.example.com
+    secretName: fieldsync-tls-secret
+  rules:
+  - host: fieldsync.example.com
+    http:
+      paths:
+      # API Routes
+      - path: /api/*
+        pathType: Prefix
+        backend:
+          service:
+            name: fieldsync-app
+            port:
+              number: 5000
+      # WebSocket Routes
+      - path: /socket.io/*
+        pathType: Prefix
+        backend:
+          service:
+            name: fieldsync-app
+            port:
+              number: 5000
+      # Main Application
+      - path: /*
+        pathType: Prefix
+        backend:
+          service:
+            name: fieldsync-nginx
+            port:
+              number: 80
+  
+  # API Subdomain
+  - host: api.fieldsync.example.com
+    http:
+      paths:
+      - path: /*
+        pathType: Prefix
+        backend:
+          service:
+            name: fieldsync-app
+            port:
+              number: 5000
+
+---
+# Internal Load Balancer for backend communication
+apiVersion: v1
+kind: Service
+metadata:
+  name: fieldsync-internal-lb
+  namespace: fieldsync
+  labels:
+    app: fieldsync
+    component: internal-lb
+  annotations:
+    service.beta.kubernetes.io/azure-load-balancer-internal: "true"
+    service.beta.kubernetes.io/azure-load-balancer-internal-subnet: "backend-subnet"
+    service.beta.kubernetes.io/azure-load-balancer-health-probe-num-of-probe: "2"
+    service.beta.kubernetes.io/azure-load-balancer-health-probe-interval: "5"
+spec:
+  type: LoadBalancer
+  loadBalancerSourceRanges:
+  - 10.0.0.0/8
+  - 172.16.0.0/12
+  - 192.168.0.0/16
+  selector:
+    app: fieldsync
+    component: application
+  ports:
+  - name: web
+    port: 80
+    targetPort: 3000
+  - name: api
+    port: 5000
+    targetPort: 5000
+
+---
+# Azure DNS Zone Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: azure-dns-config
+  namespace: fieldsync
+  labels:
+    app: fieldsync
+    component: dns
+data:
+  dns-setup.sh: |
+    #!/bin/bash
+    # Create Azure DNS Zone
+    az network dns zone create \
+      --resource-group fieldsync-infrastructure \
+      --name example.com
+    
+    # Create A records
+    az network dns record-set a add-record \
+      --resource-group fieldsync-infrastructure \
+      --zone-name example.com \
+      --record-set-name fieldsync \
+      --ipv4-address $PUBLIC_IP
+    
+    az network dns record-set a add-record \
+      --resource-group fieldsync-infrastructure \
+      --zone-name example.com \
+      --record-set-name api.fieldsync \
+      --ipv4-address $PUBLIC_IP
+
+---
+# Web Application Firewall Policy
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: azure-waf-policy
+  namespace: fieldsync
+  labels:
+    app: fieldsync
+    component: waf-policy
+data:
+  waf-policy.json: |
+    {
+      "location": "East US",
+      "properties": {
+        "policySettings": {
+          "state": "Enabled",
+          "mode": "Prevention",
+          "requestBodyCheck": true,
+          "maxRequestBodySizeInKb": 128,
+          "fileUploadLimitInMb": 50
+        },
+        "managedRules": {
+          "managedRuleSets": [
+            {
+              "ruleSetType": "OWASP",
+              "ruleSetVersion": "3.2",
+              "ruleGroupOverrides": []
+            },
+            {
+              "ruleSetType": "Microsoft_BotManagerRuleSet",
+              "ruleSetVersion": "0.1"
+            }
+          ]
+        },
+        "customRules": [
+          {
+            "name": "RateLimitRule",
+            "priority": 1,
+            "ruleType": "RateLimitRule",
+            "action": "Block",
+            "rateLimitDurationInMinutes": 1,
+            "rateLimitThreshold": 100,
+            "matchConditions": [
+              {
+                "matchVariables": [
+                  {
+                    "variableName": "RemoteAddr"
+                  }
+                ],
+                "operator": "IPMatch",
+                "matchValues": ["0.0.0.0/0"]
+              }
+            ]
+          },
+          {
+            "name": "GeoBlockingRule",
+            "priority": 2,
+            "ruleType": "MatchRule",
+            "action": "Block",
+            "matchConditions": [
+              {
+                "matchVariables": [
+                  {
+                    "variableName": "RemoteAddr"
+                  }
+                ],
+                "operator": "GeoMatch",
+                "matchValues": ["CN", "RU", "KP"]
+              }
+            ]
+          }
+        ]
+      }
+    }
+
+---
+# Azure Application Gateway Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: appgw-config
+  namespace: fieldsync
+  labels:
+    app: fieldsync
+    component: appgw-config
+data:
+  application-gateway.json: |
+    {
+      "location": "East US",
+      "properties": {
+        "sku": {
+          "name": "WAF_v2",
+          "tier": "WAF_v2",
+          "capacity": 2
+        },
+        "gatewayIPConfigurations": [
+          {
+            "name": "appGatewayIpConfig",
+            "properties": {
+              "subnet": {
+                "id": "/subscriptions/sub-id/resourceGroups/rg-name/providers/Microsoft.Network/virtualNetworks/vnet-name/subnets/appgw-subnet"
+              }
+            }
+          }
+        ],
+        "frontendIPConfigurations": [
+          {
+            "name": "appGatewayFrontendIP",
+            "properties": {
+              "publicIPAddress": {
+                "id": "/subscriptions/sub-id/resourceGroups/rg-name/providers/Microsoft.Network/publicIPAddresses/appgw-pip"
+              }
+            }
+          }
+        ],
+        "frontendPorts": [
+          {
+            "name": "port_80",
+            "properties": {
+              "port": 80
+            }
+          },
+          {
+            "name": "port_443",
+            "properties": {
+              "port": 443
+            }
+          }
+        ],
+        "backendAddressPools": [
+          {
+            "name": "fieldsync-backend-pool",
+            "properties": {
+              "backendAddresses": []
+            }
+          }
+        ],
+        "backendHttpSettingsCollection": [
+          {
+            "name": "fieldsync-http-settings",
+            "properties": {
+              "port": 80,
+              "protocol": "Http",
+              "cookieBasedAffinity": "Enabled",
+              "requestTimeout": 60,
+              "probe": {
+                "id": "/subscriptions/sub-id/resourceGroups/rg-name/providers/Microsoft.Network/applicationGateways/fieldsync-appgw/probes/fieldsync-health-probe"
+              }
+            }
+          }
+        ],
+        "httpListeners": [
+          {
+            "name": "fieldsync-http-listener",
+            "properties": {
+              "frontendIPConfiguration": {
+                "id": "/subscriptions/sub-id/resourceGroups/rg-name/providers/Microsoft.Network/applicationGateways/fieldsync-appgw/frontendIPConfigurations/appGatewayFrontendIP"
+              },
+              "frontendPort": {
+                "id": "/subscriptions/sub-id/resourceGroups/rg-name/providers/Microsoft.Network/applicationGateways/fieldsync-appgw/frontendPorts/port_80"
+              },
+              "protocol": "Http"
+            }
+          },
+          {
+            "name": "fieldsync-https-listener",
+            "properties": {
+              "frontendIPConfiguration": {
+                "id": "/subscriptions/sub-id/resourceGroups/rg-name/providers/Microsoft.Network/applicationGateways/fieldsync-appgw/frontendIPConfigurations/appGatewayFrontendIP"
+              },
+              "frontendPort": {
+                "id": "/subscriptions/sub-id/resourceGroups/rg-name/providers/Microsoft.Network/applicationGateways/fieldsync-appgw/frontendPorts/port_443"
+              },
+              "protocol": "Https",
+              "sslCertificate": {
+                "id": "/subscriptions/sub-id/resourceGroups/rg-name/providers/Microsoft.Network/applicationGateways/fieldsync-appgw/sslCertificates/fieldsync-ssl-cert"
+              }
+            }
+          }
+        ],
+        "requestRoutingRules": [
+          {
+            "name": "fieldsync-routing-rule",
+            "properties": {
+              "ruleType": "Basic",
+              "httpListener": {
+                "id": "/subscriptions/sub-id/resourceGroups/rg-name/providers/Microsoft.Network/applicationGateways/fieldsync-appgw/httpListeners/fieldsync-https-listener"
+              },
+              "backendAddressPool": {
+                "id": "/subscriptions/sub-id/resourceGroups/rg-name/providers/Microsoft.Network/applicationGateways/fieldsync-appgw/backendAddressPools/fieldsync-backend-pool"
+              },
+              "backendHttpSettings": {
+                "id": "/subscriptions/sub-id/resourceGroups/rg-name/providers/Microsoft.Network/applicationGateways/fieldsync-appgw/backendHttpSettingsCollection/fieldsync-http-settings"
+              }
+            }
+          }
+        ],
+        "probes": [
+          {
+            "name": "fieldsync-health-probe",
+            "properties": {
+              "protocol": "Http",
+              "host": "fieldsync.example.com",
+              "path": "/health",
+              "interval": 30,
+              "timeout": 5,
+              "unhealthyThreshold": 3,
+              "minServers": 0,
+              "match": {
+                "statusCodes": ["200-399"]
+              }
+            }
+          }
+        ],
+        "webApplicationFirewallConfiguration": {
+          "enabled": true,
+          "firewallMode": "Prevention",
+          "ruleSetType": "OWASP",
+          "ruleSetVersion": "3.2"
+        }
+      }
+    }
+
+---
+# Azure Monitor Configuration for Load Balancer
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: azure-monitor-config
+  namespace: fieldsync
+  labels:
+    app: fieldsync
+    component: monitoring
+data:
+  diagnostic-settings.json: |
+    {
+      "properties": {
+        "logs": [
+          {
+            "category": "ApplicationGatewayAccessLog",
+            "enabled": true,
+            "retentionPolicy": {
+              "enabled": true,
+              "days": 30
+            }
+          },
+          {
+            "category": "ApplicationGatewayPerformanceLog",
+            "enabled": true,
+            "retentionPolicy": {
+              "enabled": true,
+              "days": 30
+            }
+          },
+          {
+            "category": "ApplicationGatewayFirewallLog",
+            "enabled": true,
+            "retentionPolicy": {
+              "enabled": true,
+              "days": 30
+            }
+          }
+        ],
+        "metrics": [
+          {
+            "category": "AllMetrics",
+            "enabled": true,
+            "retentionPolicy": {
+              "enabled": true,
+              "days": 30
+            }
+          }
+        ],
+        "workspaceId": "/subscriptions/sub-id/resourceGroups/rg-name/providers/Microsoft.OperationalInsights/workspaces/fieldsync-workspace"
+      }
+    }
+
+---
+# Traffic Manager Profile for Global Load Balancing
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: traffic-manager-config
+  namespace: fieldsync
+  labels:
+    app: fieldsync
+    component: global-lb
+data:
+  traffic-manager.json: |
+    {
+      "location": "global",
+      "properties": {
+        "profileStatus": "Enabled",
+        "trafficRoutingMethod": "Performance",
+        "dnsConfig": {
+          "relativeName": "fieldsync-global",
+          "ttl": 60
+        },
+        "monitorConfig": {
+          "protocol": "HTTPS",
+          "port": 443,
+          "path": "/health",
+          "intervalInSeconds": 30,
+          "timeoutInSeconds": 10,
+          "toleratedNumberOfFailures": 3
+        },
+        "endpoints": [
+          {
+            "name": "fieldsync-eastus",
+            "type": "Microsoft.Network/trafficManagerProfiles/azureEndpoints",
+            "properties": {
+              "targetResourceId": "/subscriptions/sub-id/resourceGroups/rg-eastus/providers/Microsoft.Network/publicIPAddresses/fieldsync-pip-eastus",
+              "endpointStatus": "Enabled",
+              "weight": 100,
+              "priority": 1
+            }
+          },
+          {
+            "name": "fieldsync-westus",
+            "type": "Microsoft.Network/trafficManagerProfiles/azureEndpoints",
+            "properties": {
+              "targetResourceId": "/subscriptions/sub-id/resourceGroups/rg-westus/providers/Microsoft.Network/publicIPAddresses/fieldsync-pip-westus",
+              "endpointStatus": "Enabled",
+              "weight": 100,
+              "priority": 2
+            }
+          }
+        ]
+      }
+    }

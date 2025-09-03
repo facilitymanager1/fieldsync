@@ -1,0 +1,261 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fieldsync-nginx
+  namespace: fieldsync
+  labels:
+    app: fieldsync
+    component: nginx
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: fieldsync
+      component: nginx
+  template:
+    metadata:
+      labels:
+        app: fieldsync
+        component: nginx
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:alpine
+        ports:
+        - containerPort: 80
+          name: http
+        - containerPort: 443
+          name: https
+        volumeMounts:
+        - name: nginx-config
+          mountPath: /etc/nginx/nginx.conf
+          subPath: nginx.conf
+          readOnly: true
+        - name: tls-certs
+          mountPath: /etc/nginx/ssl
+          readOnly: true
+        - name: nginx-cache
+          mountPath: /var/cache/nginx
+        - name: nginx-run
+          mountPath: /var/run
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "50m"
+          limits:
+            memory: "128Mi"
+            cpu: "100m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 80
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 80
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+      volumes:
+      - name: nginx-config
+        configMap:
+          name: nginx-config
+      - name: tls-certs
+        secret:
+          secretName: fieldsync-tls
+      - name: nginx-cache
+        emptyDir: {}
+      - name: nginx-run
+        emptyDir: {}
+      # Pod anti-affinity for high availability
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - fieldsync
+                - key: component
+                  operator: In
+                  values:
+                  - nginx
+              topologyKey: kubernetes.io/hostname
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fieldsync-nginx
+  namespace: fieldsync
+  labels:
+    app: fieldsync
+    component: nginx
+spec:
+  type: LoadBalancer
+  selector:
+    app: fieldsync
+    component: nginx
+  ports:
+  - port: 80
+    targetPort: 80
+    name: http
+    protocol: TCP
+  - port: 443
+    targetPort: 443
+    name: https
+    protocol: TCP
+
+---
+# Ingress for advanced routing and SSL termination
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: fieldsync-ingress
+  namespace: fieldsync
+  labels:
+    app: fieldsync
+  annotations:
+    kubernetes.io/ingress.class: "nginx"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+    nginx.ingress.kubernetes.io/rate-limit: "100"
+    nginx.ingress.kubernetes.io/rate-limit-window: "1m"
+    nginx.ingress.kubernetes.io/upstream-keepalive-connections: "32"
+    nginx.ingress.kubernetes.io/upstream-keepalive-requests: "100"
+    nginx.ingress.kubernetes.io/upstream-keepalive-timeout: "60s"
+    # Security headers
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      more_set_headers "X-Frame-Options: DENY";
+      more_set_headers "X-Content-Type-Options: nosniff";
+      more_set_headers "X-XSS-Protection: 1; mode=block";
+      more_set_headers "Strict-Transport-Security: max-age=31536000; includeSubDomains";
+      more_set_headers "Referrer-Policy: strict-origin-when-cross-origin";
+spec:
+  tls:
+  - hosts:
+    - fieldsync.example.com  # Replace with your domain
+    secretName: fieldsync-tls
+  rules:
+  - host: fieldsync.example.com  # Replace with your domain
+    http:
+      paths:
+      # API routes
+      - path: /api
+        pathType: Prefix
+        backend:
+          service:
+            name: fieldsync-app
+            port:
+              number: 5000
+      # Socket.IO WebSocket routes
+      - path: /socket.io
+        pathType: Prefix
+        backend:
+          service:
+            name: fieldsync-app
+            port:
+              number: 5000
+      # File upload routes
+      - path: /upload
+        pathType: Prefix
+        backend:
+          service:
+            name: fieldsync-app
+            port:
+              number: 5000
+      # Main application routes
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: fieldsync-app
+            port:
+              number: 3000
+
+---
+# Certificate issuer for automatic SSL certificate management (using cert-manager)
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+  namespace: fieldsync
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: admin@fieldsync.example.com  # Replace with your email
+    privateKeySecretRef:
+      name: letsencrypt-prod
+    solvers:
+    - http01:
+        ingress:
+          class: nginx
+
+---
+# Certificate for automatic SSL
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: fieldsync-cert
+  namespace: fieldsync
+spec:
+  secretName: fieldsync-tls-auto
+  issuerRef:
+    name: letsencrypt-prod
+    kind: ClusterIssuer
+  dnsNames:
+  - fieldsync.example.com  # Replace with your domain
+
+---
+# Network Policy for Nginx
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: nginx-network-policy
+  namespace: fieldsync
+spec:
+  podSelector:
+    matchLabels:
+      app: fieldsync
+      component: nginx
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from: []  # Allow ingress from anywhere (internet traffic)
+    ports:
+    - protocol: TCP
+      port: 80
+    - protocol: TCP
+      port: 443
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app: fieldsync
+          component: application
+    ports:
+    - protocol: TCP
+      port: 3000
+    - protocol: TCP
+      port: 5000
+  - to: []  # Allow DNS resolution
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
